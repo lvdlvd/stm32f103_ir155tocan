@@ -25,6 +25,7 @@
 */
 
 enum {
+    PWM_OUT_PIN = PA6, // debug source: 10Hz 33% signal
     PWM_IN_PIN = PA8,
     USART1_TX_PIN = PA9,
     USART1_RX_PIN = PA10,
@@ -41,6 +42,7 @@ static struct gpio_config_t {
     {PAAll, Mode_IN}, // reset
 //  {PBAll, Mode_IN}, // reset
     {PCAll, Mode_IN}, // reset
+	{PWM_OUT_PIN, Mode_AF_PP_2MHz},
 	{PWM_IN_PIN, Mode_IPU},
     {USART1_TX_PIN, Mode_AF_PP_50MHz},
     {USART1_RX_PIN, Mode_IPU},
@@ -83,6 +85,7 @@ void TIM1_UP_IRQ_Handler(void) {
     TIM1.SR &= ~TIM_SR_UIF;
     period = 0;
     dutyc  = 0;
+    led0_on();
 }
 
 void TIM1_CC_IRQ_Handler(void) {
@@ -90,6 +93,7 @@ void TIM1_CC_IRQ_Handler(void) {
     if (sr & TIM_SR_CC2IF) {
         dutyc = TIM1.CCR2;
         TIM1.SR &= ~TIM_SR_CC2IF;
+        led0_off();
     }
     if (sr & TIM_SR_CC1IF) {
         period = TIM1.CCR1;
@@ -97,7 +101,10 @@ void TIM1_CC_IRQ_Handler(void) {
     }
 
     if (period && dutyc) {
-        serial_printf(&USART1, "% 5d/% 5d\eK\n", 5*(int)dutyc, 4*(int)period);
+        serial_printf(&USART1, "% 5d/% 5d\eK\n", 4*(int)dutyc, 4*(int)period);
+
+        // TODO depending on frequency and duty cycle send CAN msg
+
         period = 0;
         dutyc  = 0;        
     }
@@ -116,8 +123,7 @@ int main(void) {
                 irqprios[i].irq, NVIC_EncodePriority(IRQ_PRIORITY_GROUPING, irqprios[i].group, irqprios[i].sub));
     }
 
-    RCC.APB2ENR |= RCC_APB2ENR_USART1EN | RCC_APB2ENR_IOPAEN | RCC_APB2ENR_IOPCEN;
-    RCC.APB1ENR |= RCC_APB1ENR_TIM3EN;
+    RCC.APB2ENR |= RCC_APB2ENR_USART1EN | RCC_APB2ENR_TIM1EN | RCC_APB2ENR_IOPAEN | RCC_APB2ENR_IOPCEN;
 
     delay(10);  // let all clocks and peripherals start up
 
@@ -140,6 +146,8 @@ int main(void) {
             rf & 0x20 ? " IWDG" : "", rf & 0x10 ? " SFT" : "", rf & 0x08 ? " POR" : "", rf & 0x04 ? " PIN" : "");
     serial_wait(&USART1);
 
+    bxcan_init(CAN_1MBd);
+
     // CC1,2 channel is configured as input, IC1,2 both mapped on TI1,  fSAMPLING=fDTS/8, N=8
     TIM1.CR1    = 2 << 8;  // CKD = /4, 18MHz
     TIM1.DIER   = TIM_DIER_UIE | TIM_DIER_CC1IE | TIM_DIER_CC2IE;
@@ -153,6 +161,14 @@ int main(void) {
     NVIC_EnableIRQ(TIM1_CC_IRQn);
     TIM1.CR1 |= TIM_CR1_CEN;
 
+    // For debugging, generate 10Hz/50% on TIM3CH1 PA6
+    TIM2.PSC    = (CLOCKSPEED_HZ / 10000) - 1;  // 10 Khz.
+    TIM2.ARR    = 1000; // 10Hz  
+    TIM2.CCR1   =  333; // 33% duty cycle
+    TIM2.CCER   = TIM_CCER_CC1E;
+    TIM2.CR1 |= TIM_CR1_CEN;
+
+#if 0
     // Initialize the independent watchdog
     while (IWDG.SR != 0)
         __NOP();
@@ -161,6 +177,10 @@ int main(void) {
     IWDG.PR = 0;  // prescaler /4 -> 10kHz
     IWDG.RLR = 0xFFF;  // count to 4096 -> 409.6ms timeout
     IWDG.KR = 0xCCCC;  // start watchdog countdown
+
+    //...
+    IWDG.KR = 0xAAAA;
+#endif
 
     for (;;)
         __WFI();
