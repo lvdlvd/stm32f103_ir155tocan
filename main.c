@@ -79,34 +79,141 @@ struct {
 };
 /* clang-format on */
 
-static uint16_t period = 0;
-static uint16_t dutyc = 0;
+enum {
+    HDR29_BASE        = 0x19690908,
+
+    // flags to compose the message (bit [16...13])
+    MSG_NORMALOP        = 0x1,  // payload present: uint16 resistance in kOhm (10/20Hz)
+    MSG_UNDERVOLT       = 0x2,  // combined with normal op, not a fault (20Hz)
+    MSG_SSM             = 0x4,  // speed start measurement mode (30Hz)
+    MSG_FAULT           = 0x8,  // something is wrong:
+
+    MSG_NO_SIGNAL       = MSG_FAULT,                  // 0x8 no pwm detected
+    MSG_INSFAULT        = MSG_FAULT | MSG_NORMALOP,   // 0x9  10Hz with R < 100K
+    MSG_GROUNDFLT       = MSG_FAULT | MSG_UNDERVOLT,  // 0xA  50Hz/50%
+    MSG_INSFAULT_UV     = MSG_FAULT | MSG_NORMALOP | MSG_UNDERVOLT,   // 0xB  20Hz with R < 100K 
+    MSG_INSFAULT_SSM    = MSG_FAULT | MSG_SSM,                 // 0xC   30Hz, >90%
+    MSG_RESERVED        = MSG_FAULT | MSG_SSM | MSG_NORMALOP,  // 0xD not used
+    MSG_DEVFLT          = MSG_FAULT | MSG_UNDERVOLT | MSG_SSM, // 0xE 40Hz/50% device fault 
+    MSG_INVALID         = MSG_FAULT | 7,                       // 0xF outside of valid period/dutyc bounds
+
+};
+
+static uint32_t mkhdr(uint32_t msgid) { return HDR29_BASE | (msgid & 0xf)<<12; }
+
+static struct { int period; int freq; } p2f[] = {
+    {18000, 0},
+    {22000, 50},
+    {24000, 0},
+    {26000, 40},
+    {30000, 0},
+    {35000, 30},
+    {48000, 0},
+    {52000, 20},
+    {90000, 0},
+    {110000, 10},
+    {__INT_MAX__, 0},
+};
+
+int sendmsg(int period_us, int dutyc_us) {
+    uint8_t buf[] = {0,0,0,0,0,0,0,0};
+    if (period_us == 0) {
+        return bxcan_tx(mkhdr(MSG_NO_SIGNAL), 0, buf);
+    }
+
+    if ((dutyc_us*20 < period_us) || (period_us - dutyc_us)*20 < period_us) {
+        // not a valid duty cycle
+        return bxcan_tx(mkhdr(MSG_INVALID), 0, buf);
+    }
+
+    int freq = 0;
+    for (int i = 0; ; ++i) {
+        if (period_us < p2f[i].period) {
+            freq = p2f[i].freq;
+            break;
+        }
+    }
+
+    uint32_t msgid = 0;
+    switch (freq) {
+    case 20:
+        msgid = MSG_UNDERVOLT;
+        // fallthrough
+    case 10:
+        msgid += MSG_NORMALOP;
+        if (dutyc_us*20 < period_us)  // less than 5%
+            break; 
+        if ((period_us - dutyc_us)*20 < period_us)  // more than 95%
+            break; 
+
+        // dc = duty_us / period_us
+        // rf = (.9 x 1200k) / (dc - .05)  - 1200k
+        // rf = (.9 * 1200k) / (duty_us / period_us - 0.05) - 1200k
+        // rf = (9000 * 1200k) / (10000*duty_us / period_us - 500) - 1200k
+        int rf = ((9000 * 1200) / (((10000*dutyc_us) / period_us) - 500)) - 1200;
+        buf[0] = rf / 256;
+        buf[1] = rf % 256;
+        if (rf < 100)
+            msgid += MSG_FAULT;
+        return bxcan_tx(mkhdr(msgid), 2, buf);
+
+    case 30:
+        msgid = MSG_SSM;
+
+        if (dutyc_us*2 > period_us)  // less than 50%
+            msgid += MSG_FAULT;
+        return bxcan_tx(mkhdr(msgid), 2, buf);
+
+    case 40:
+        msgid = MSG_DEVFLT - MSG_GROUNDFLT;  // cheat..
+        // fallthrough
+    case 50:
+        msgid += MSG_GROUNDFLT; // ...see!
+
+        if ( ((100*dutyc_us) / period_us) < 47)
+            break; 
+        
+        if ( ((100*dutyc_us) / period_us) > 53)
+            break; 
+
+        return bxcan_tx(mkhdr(msgid), 2, buf);
+    }
+
+    // not a valid frequency
+    return bxcan_tx(mkhdr(MSG_INVALID), 0, buf);
+}
+
+static int period_us = 0; // time between two raising edges 
+static int dutyc_us  = 0;  // time between raising and falling edge
 void TIM1_UP_IRQ_Handler(void) {
     TIM1.SR &= ~TIM_SR_UIF;
-    period = 0;
-    dutyc  = 0;
+    if (!period_us) {
+        dutyc_us  = 0;        
+        sendmsg(0, 0); // no complete period
+    }
     led0_on();
 }
 
 void TIM1_CC_IRQ_Handler(void) {
     uint16_t sr = TIM1.SR;
-    if (sr & TIM_SR_CC2IF) {
-        dutyc = TIM1.CCR2;
-        TIM1.SR &= ~TIM_SR_CC2IF;
-        led0_off();
-    }
     if (sr & TIM_SR_CC1IF) {
-        period = TIM1.CCR1;
+        period_us = 4*(int)TIM1.CCR1;
         TIM1.SR &= ~TIM_SR_CC1IF;
     }
 
-    if (period && dutyc) {
-        serial_printf(&USART1, "% 5d/% 5d\eK\n", 4*(int)dutyc, 4*(int)period);
+    if (sr & TIM_SR_CC2IF) {
+        dutyc_us = 4*(int)TIM1.CCR2;
+        TIM1.SR &= ~TIM_SR_CC2IF;
+        led0_off();
+    }
 
-        // TODO depending on frequency and duty cycle send CAN msg
+    if (period_us && dutyc_us) {
+        serial_printf(&USART1, "% 5d/% 5d\eK\n", dutyc_us, period_us);
 
-        period = 0;
-        dutyc  = 0;        
+        sendmsg(period_us, dutyc_us);
+
+        period_us = 0;
+        dutyc_us  = 0;        
     }
 }
 
@@ -157,16 +264,17 @@ int main(void) {
     TIM1.CCMR1  = (9 << 12) | (9 << 4) | (2 << 8) | 1;
     TIM1.CCMR2  = 0;
     TIM1.CCER   = TIM_CCER_CC1E | TIM_CCER_CC2E | TIM_CCER_CC2P;  // 1,2 enabled, 2 inverted
+    TIM1.CR1   |= TIM_CR1_CEN;
     NVIC_EnableIRQ(TIM1_UP_IRQn);
     NVIC_EnableIRQ(TIM1_CC_IRQn);
-    TIM1.CR1 |= TIM_CR1_CEN;
 
-    // For debugging, generate 10Hz/50% on TIM3CH1 PA6
+    // For debugging, generate 10Hz/33% on TIM3CH1 PA6
     TIM2.PSC    = (CLOCKSPEED_HZ / 10000) - 1;  // 10 Khz.
     TIM2.ARR    = 1000; // 10Hz  
+    TIM2.CCMR1  = 0b110 << 4;  // PWM1 mode
     TIM2.CCR1   =  333; // 33% duty cycle
     TIM2.CCER   = TIM_CCER_CC1E;
-    TIM2.CR1 |= TIM_CR1_CEN;
+    TIM2.CR1   |= TIM_CR1_CEN;
 
 #if 0
     // Initialize the independent watchdog
