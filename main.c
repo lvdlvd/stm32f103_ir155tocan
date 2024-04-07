@@ -115,15 +115,27 @@ static struct { int period; int freq; } p2f[] = {
     {__INT_MAX__, 0},
 };
 
+static uint32_t lastmsg = 0;
+static uint64_t last_us = 0;
+
+int limit_msg(uint32_t header, size_t len, uint8_t payload[8]) {
+    uint64_t now_us = cycleCount()/C_US;
+    if ((lastmsg == header) && ((now_us - last_us) < 90000))
+        return -1;
+    lastmsg = header;
+    last_us = now_us;
+    return bxcan_tx(header, len, payload);
+}
+
 int sendmsg(int period_us, int dutyc_us) {
     uint8_t buf[] = {0,0,0,0,0,0,0,0};
     if (period_us == 0) {
-        return bxcan_tx(mkhdr(MSG_NO_SIGNAL), 0, buf);
+        return limit_msg(mkhdr(MSG_NO_SIGNAL), 0, buf);
     }
 
     if ((dutyc_us*20 < period_us) || (period_us - dutyc_us)*20 < period_us) {
         // not a valid duty cycle
-        return bxcan_tx(mkhdr(MSG_INVALID), 0, buf);
+        return limit_msg(mkhdr(MSG_INVALID), 0, buf);
     }
 
     int freq = 0;
@@ -155,14 +167,14 @@ int sendmsg(int period_us, int dutyc_us) {
         buf[1] = rf % 256;
         if (rf < 100)
             msgid += MSG_FAULT;
-        return bxcan_tx(mkhdr(msgid), 2, buf);
+        return limit_msg(mkhdr(msgid), 2, buf);
 
     case 30:
         msgid = MSG_SSM;
 
         if (dutyc_us*2 > period_us)  // less than 50%
             msgid += MSG_FAULT;
-        return bxcan_tx(mkhdr(msgid), 2, buf);
+        return limit_msg(mkhdr(msgid), 2, buf);
 
     case 40:
         msgid = MSG_DEVFLT - MSG_GROUNDFLT;  // cheat..
@@ -176,11 +188,11 @@ int sendmsg(int period_us, int dutyc_us) {
         if ( ((100*dutyc_us) / period_us) > 53)
             break; 
 
-        return bxcan_tx(mkhdr(msgid), 2, buf);
+        return limit_msg(mkhdr(msgid), 2, buf);
     }
 
     // not a valid frequency
-    return bxcan_tx(mkhdr(MSG_INVALID), 0, buf);
+    return limit_msg(mkhdr(MSG_INVALID), 0, buf);
 }
 
 static int period_us = 0; // time between two raising edges 

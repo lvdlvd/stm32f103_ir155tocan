@@ -33,5 +33,4 @@ They are combined as follows:
 |  0xE |      | ~50% | DEVFLT      |        | Device fault 
 |  0xF |      |      | INVALID     |        | outside of valid period/dutyc bounds |
 
-
-TODO: Duplicate messages within 100ms are supressed, but changes are broadcast without delay.
+Duplicate messages within 90ms are supressed, but changes are broadcast without delay.
