@@ -12,8 +12,9 @@
 
     Pin   Function     DIR   Electrical     Connected to
     ---   ---------    ---   -----------    ---------------------------------------
+    PA6   TIM3 CH1     out   AP_PP 2MHz     debug pwm output 10Hz 33% signal
 
-    PA8   TIM1 CH1     in    PullUp         IR155 PWM output
+    PA8   TIM1 CH1     in    PullUp         IR155 PWM output (5V tolerant)
     PA9   USART1 TX    out   AF_PP 10MHz    Debug Console 115200 8N1
     PA10  USART1 RX    in    PullUp
     PA11  CAN1 RX      in    PullUp         CAN transceiver RX  1Mbit
@@ -25,7 +26,7 @@
 */
 
 enum {
-    PWM_OUT_PIN = PA6, // debug source: 10Hz 33% signal
+    PWM_OUT_PIN = PA6,
     PWM_IN_PIN = PA8,
     USART1_TX_PIN = PA9,
     USART1_RX_PIN = PA10,
@@ -243,6 +244,7 @@ int main(void) {
     }
 
     RCC.APB2ENR |= RCC_APB2ENR_USART1EN | RCC_APB2ENR_TIM1EN | RCC_APB2ENR_IOPAEN | RCC_APB2ENR_IOPCEN;
+    RCC.APB1ENR |= RCC_APB1ENR_TIM3EN;
 
     delay(10);  // let all clocks and peripherals start up
 
@@ -280,13 +282,13 @@ int main(void) {
     NVIC_EnableIRQ(TIM1_UP_IRQn);
     NVIC_EnableIRQ(TIM1_CC_IRQn);
 
-    // For debugging, generate 10Hz/33% on TIM3CH1 PA6
-    TIM2.PSC    = (CLOCKSPEED_HZ / 10000) - 1;  // 10 Khz.
-    TIM2.ARR    = 1000; // 10Hz  
-    TIM2.CCMR1  = 0b110 << 4;  // PWM1 mode
-    TIM2.CCR1   =  333; // 33% duty cycle
-    TIM2.CCER   = TIM_CCER_CC1E;
-    TIM2.CR1   |= TIM_CR1_CEN;
+    // For debugging, generate 10Hz/33% on TIM2CH1 PA6
+    TIM3.PSC    = (CLOCKSPEED_HZ / 10000) - 1;  // 10 Khz.
+    TIM3.ARR    = 1000; // 10Hz  
+    TIM3.CCMR1  = 0b110 << 4;  // PWM1 mode
+    TIM3.CCR1   =  333; // 33% duty cycle
+    TIM3.CCER   = TIM_CCER_CC1E;
+    TIM3.CR1   |= TIM_CR1_CEN;
 
 #if 0
     // Initialize the independent watchdog
