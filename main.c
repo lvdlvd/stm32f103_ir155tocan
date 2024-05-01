@@ -95,6 +95,8 @@ enum {
 
 };
 
+const char* label[] = { "<0>","NORMALOP","<2>","UNDERVOLT","SSM","<5>","<6>","<7>","NO_SIGNAL","INSFAULT","GROUNDFLT","INSFAULT_UV","INSFAULT_SSM","<D>","DEVFLT","INVALID",};
+
 static uint32_t mkhdr(uint32_t msgid) {  
     uint32_t r = HDR29_BASE | (msgid & 0xf)<<12; 
     return (r << 3) | CAN_TI0R_IDE;
@@ -123,10 +125,14 @@ int limit_msg(uint32_t header, size_t len, uint8_t payload[8]) {
         return -1;
     lastmsg = header;
     last_us = now_us;
+
     return bxcan_tx(header, len, payload);
 }
 
 int sendmsg(int period_us, int dutyc_us) {
+
+    serial_printf(&USART1, "%lld  % 5d/% 5d\e[K\n", cycleCount()/C_US, dutyc_us, period_us);
+
     uint8_t buf[] = {0,0,0,0,0,0,0,0};
     if (period_us == 0) {
         return limit_msg(mkhdr(MSG_NO_SIGNAL), 0, buf);
@@ -166,6 +172,7 @@ int sendmsg(int period_us, int dutyc_us) {
         buf[1] = rf % 256;
         if (rf < 100)
             msgid += MSG_FAULT;
+
         return limit_msg(mkhdr(msgid), 2, buf);
 
     case 30:
@@ -186,46 +193,40 @@ int sendmsg(int period_us, int dutyc_us) {
         
         if ( ((100*dutyc_us) / period_us) > 53)
             break; 
-
         return limit_msg(mkhdr(msgid), 2, buf);
     }
 
     // not a valid frequency
     return limit_msg(mkhdr(MSG_INVALID), 0, buf);
 }
-
-static int period_us = 0; // time between two raising edges 
-static int dutyc_us  = 0;  // time between raising and falling edge
+static int period_us = 0; // time between start and end raising edges 
+static int dutyc_us  = 0; // time between start raising and first falling edge
 void TIM1_UP_IRQ_Handler(void) {
+    serial_printf(&USART1, "%lld UP\n", cycleCount()/C_US);
     TIM1.SR &= ~TIM_SR_UIF;
     if (!period_us) {
-        dutyc_us  = 0;        
         sendmsg(0, 0); // no complete period
     }
+    period_us = 0;
+    dutyc_us  = 0;        
+
     led0_on();
 }
 
 void TIM1_CC_IRQ_Handler(void) {
     uint16_t sr = TIM1.SR;
+
     if (sr & TIM_SR_CC1IF) {
         period_us = 4*(int)TIM1.CCR1;
-        TIM1.SR &= ~TIM_SR_CC1IF;
+        sendmsg(period_us, dutyc_us);
     }
 
     if (sr & TIM_SR_CC2IF) {
         dutyc_us = 4*(int)TIM1.CCR2;
-        TIM1.SR &= ~TIM_SR_CC2IF;
         led0_off();
     }
 
-    if (period_us && dutyc_us) {
-        serial_printf(&USART1, "%lld % 5d/% 5d\eK\n", cycleCount()/C_US, dutyc_us, period_us);
-
-        sendmsg(period_us, dutyc_us);
-
-        period_us = 0;
-        dutyc_us  = 0;        
-    }
+    TIM1.SR &= ~(TIM_SR_CC1IF|TIM_SR_CC2IF);
 }
 
 
@@ -267,6 +268,7 @@ int main(void) {
     bxcan_init(CAN_1MBd);
 
     // CC1,2 channel is configured as input, IC1,2 both mapped on TI1,  fSAMPLING=fDTS/8, N=8
+    // TI1 is trigger, trigger is reset, CC2 captures duty, CC1 captures period
     TIM1.CR1    = 2 << 8;  // CKD = /4, 18MHz
     TIM1.DIER   = TIM_DIER_UIE | TIM_DIER_CC1IE | TIM_DIER_CC2IE;
     TIM1.PSC    = (CLOCKSPEED_HZ / 250000) - 1;  // 250Khz or 4us.
@@ -279,7 +281,7 @@ int main(void) {
     NVIC_EnableIRQ(TIM1_UP_IRQn);
     NVIC_EnableIRQ(TIM1_CC_IRQn);
 
-    // For debugging, generate 10Hz/33% on TIM2CH1 PA6
+    // For debugging, generate 10Hz/33% on TIM3CH1 PA6
     TIM3.PSC    = (CLOCKSPEED_HZ / 10000) - 1;  // 10 Khz.
     TIM3.ARR    = 1000; // 10Hz  
     TIM3.CCMR1  = 0b110 << 4;  // PWM1 mode
