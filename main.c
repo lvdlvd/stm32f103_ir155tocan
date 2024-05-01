@@ -54,17 +54,9 @@ static struct gpio_config_t {
 };
 /* clang-format on */
 
-static inline void led0_on(void) {
-    digitalLo(LED0_PIN);
-}
-static inline void led0_off(void) {
-    digitalHi(LED0_PIN);
-}
-static inline void led0_toggle(void) {
-    digitalToggle(LED0_PIN);
-}
-
-static struct Ringbuffer usart1tx;
+static inline void led0_on(void)     { digitalLo(LED0_PIN); }
+static inline void led0_off(void)    { digitalHi(LED0_PIN); }
+static inline void led0_toggle(void) { digitalToggle(LED0_PIN); }
 
 /* clang-format off */
 enum { IRQ_PRIORITY_GROUPING = 5 }; // prio[7:6] : 4 groups,  prio[5:4] : 4 subgroups
@@ -79,6 +71,9 @@ struct {
     {None_IRQn, 0xff, 0xff},
 };
 /* clang-format on */
+
+static struct Ringbuffer usart1tx;
+void USART1_IRQ_Handler(void) { serial_irq_handler(&USART1, &usart1tx); }
 
 enum {
     HDR29_BASE        = 0x19690908,
@@ -100,7 +95,10 @@ enum {
 
 };
 
-static uint32_t mkhdr(uint32_t msgid) { return HDR29_BASE | (msgid & 0xf)<<12; }
+static uint32_t mkhdr(uint32_t msgid) {  
+    uint32_t r = HDR29_BASE | (msgid & 0xf)<<12; 
+    return (r << 3) | CAN_TI0R_IDE;
+}
 
 static struct { int period; int freq; } p2f[] = {
     {18000, 0},
@@ -221,7 +219,7 @@ void TIM1_CC_IRQ_Handler(void) {
     }
 
     if (period_us && dutyc_us) {
-        serial_printf(&USART1, "% 5d/% 5d\eK\n", dutyc_us, period_us);
+        serial_printf(&USART1, "%lld % 5d/% 5d\eK\n", cycleCount()/C_US, dutyc_us, period_us);
 
         sendmsg(period_us, dutyc_us);
 
@@ -239,12 +237,11 @@ int main(void) {
 
     NVIC_SetPriorityGrouping(IRQ_PRIORITY_GROUPING);
     for (int i = 0; irqprios[i].irq != None_IRQn; i++) {
-        NVIC_SetPriority(
-                irqprios[i].irq, NVIC_EncodePriority(IRQ_PRIORITY_GROUPING, irqprios[i].group, irqprios[i].sub));
+        NVIC_SetPriority(irqprios[i].irq, NVIC_EncodePriority(IRQ_PRIORITY_GROUPING, irqprios[i].group, irqprios[i].sub));
     }
 
     RCC.APB2ENR |= RCC_APB2ENR_USART1EN | RCC_APB2ENR_TIM1EN | RCC_APB2ENR_IOPAEN | RCC_APB2ENR_IOPCEN;
-    RCC.APB1ENR |= RCC_APB1ENR_TIM3EN;
+    RCC.APB1ENR |= RCC_APB1ENR_TIM3EN | RCC_APB1ENR_CAN1EN;
 
     delay(10);  // let all clocks and peripherals start up
 
@@ -303,6 +300,8 @@ int main(void) {
     //...
     IWDG.KR = 0xAAAA;
 #endif
+
+    serial_printf(&USART1, "%lld mainloop start\n", cycleCount()/C_US);
 
     for (;;)
         __WFI();
